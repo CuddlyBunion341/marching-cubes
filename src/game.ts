@@ -1,5 +1,4 @@
 import * as THREE from 'three';
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TerrainRenderer } from './terrain/TerrainRenderer';
 
 const scene = new THREE.Scene();
@@ -19,7 +18,8 @@ scene.add(directionalLight);
 // Setup terrain
 let terrainRenderer: TerrainRenderer | null = null;
 
-let controls: OrbitControls | null = null;
+// Replace controls type with a simple flight mode toggle
+let flightModeEnabled = true;
 camera.position.set(20, 20, 20);
 
 let renderer: THREE.WebGLRenderer | null = null;
@@ -43,6 +43,33 @@ let moveEvent: MouseEvent | null = null;
 // Add variables for tracking camera movement
 let lastCameraPosition = new THREE.Vector3();
 let chunkUpdateDistance = 10; // Distance the camera needs to move before updating chunks
+
+// Add key state tracking for flight controls
+const keys = {
+  w: false,
+  a: false,
+  s: false,
+  d: false,
+  shift: false,
+  space: false,
+  q: false,
+  e: false,
+  r: false
+};
+
+// Flight control variables
+let moveSpeed = 0.5;
+let runSpeed = 1.5;
+let rotateSpeed = 0.02;
+
+// Mouse movement for camera rotation
+let pitchObject = new THREE.Object3D();
+let yawObject = new THREE.Object3D();
+yawObject.add(pitchObject);
+
+// Initialize pitch/yaw rotation values
+let pitch = 0;
+let yaw = 0;
 
 // Performance settings
 function updatePerformanceSettings() {
@@ -197,8 +224,26 @@ function animate() {
     renderer.render(scene, camera);
   }
 
-  if (controls) {
-    controls.update();
+  // Handle flight controls movement
+  if (flightModeEnabled && camera) {
+    // Apply flight movement based on key states
+    const speed = keys.shift ? runSpeed : moveSpeed;
+    
+    // Get forward/right directions from camera matrix
+    const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+    const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+    
+    // Apply movement
+    if (keys.w) camera.position.addScaledVector(forward, speed);
+    if (keys.s) camera.position.addScaledVector(forward, -speed);
+    if (keys.a) camera.position.addScaledVector(right, -speed);
+    if (keys.d) camera.position.addScaledVector(right, speed);
+    if (keys.space) camera.position.y += speed;
+    if (keys.q) camera.position.y -= speed;
+    
+    // Additional rotation with e and q keys
+    if (keys.e) camera.rotateY(-rotateSpeed);
+    if (keys.r) camera.rotateY(rotateSpeed);
   }
   
   // Update chunks when camera moves significantly
@@ -227,7 +272,7 @@ function animate() {
 
 // Handle mouse events
 function onMouseDown(event: MouseEvent) {
-  if (!controls || !terrainRenderer || !terrainRenderer.terrainMesh) return;
+  if (!terrainRenderer || !terrainRenderer.terrainMesh) return;
   
   isMouseDown = true;
   lastRaycastPoint = null; // Reset last point when starting a new stroke
@@ -277,6 +322,19 @@ function onMouseUp() {
 }
 
 function onKeyDown(event: KeyboardEvent) {
+  // Update key states for flight controls
+  switch(event.key.toLowerCase()) {
+    case 'w': keys.w = true; break;
+    case 'a': keys.a = true; break;
+    case 's': keys.s = true; break;
+    case 'd': keys.d = true; break;
+    case 'shift': keys.shift = true; break;
+    case ' ': keys.space = true; break;
+    case 'q': keys.q = true; break;
+    case 'e': keys.e = true; break;
+    case 'r': keys.r = true; break;
+  }
+  
   if (event.key === "Shift") {
     isShiftDown = true;
     editMode = "remove";
@@ -335,6 +393,19 @@ function onKeyDown(event: KeyboardEvent) {
 }
 
 function onKeyUp(event: KeyboardEvent) {
+  // Update key states for flight controls
+  switch(event.key.toLowerCase()) {
+    case 'w': keys.w = false; break;
+    case 'a': keys.a = false; break;
+    case 's': keys.s = false; break;
+    case 'd': keys.d = false; break;
+    case 'shift': keys.shift = false; break;
+    case ' ': keys.space = false; break;
+    case 'q': keys.q = false; break;
+    case 'e': keys.e = false; break;
+    case 'r': keys.r = false; break;
+  }
+  
   if (event.key === "Shift") {
     isShiftDown = false;
     editMode = "add";
@@ -389,9 +460,7 @@ function updateRaycasting() {
     // Get the point of intersection
     const point = intersects[0].point;
     
-    // Don't modify terrain if controls are being used (rotating/panning)
-    if (controls && !controls.enableRotate) return;
-    
+    // Remove orbit control check since we're not using orbit controls
     // Don't modify terrain repeatedly at the same position
     // Use a distance threshold based on brush size for better performance
     const minMoveDistance = terrainRenderer.getBrushSize() * 0.2;
@@ -512,11 +581,9 @@ export function setupRenderer(container: HTMLElement) {
   renderer.setAnimationLoop(animate);
   container.appendChild(renderer.domElement);
 
-  // Setup controls
-  controls = new OrbitControls(camera, renderer.domElement);
-  controls.enableDamping = true;
-  controls.dampingFactor = 0.05;
-
+  // Set up flight controls instead of orbit controls
+  flightModeEnabled = true;
+  
   // Create or clear GUI container
   if (!guiContainer) {
     guiContainer = document.createElement('div');
@@ -555,12 +622,51 @@ export function setupRenderer(container: HTMLElement) {
     renderDistance: 4
   });
 
+  // Setup custom flight controls
+  // Hide the cursor in flight mode for better FPS experience
+  renderer.domElement.style.cursor = 'crosshair';
+  
+  // Lock pointer for FPS controls
+  renderer.domElement.addEventListener('click', () => {
+    if (renderer && renderer.domElement) {
+      renderer.domElement.requestPointerLock();
+    }
+  });
+  
+  // Mouse movement for camera rotation
+  document.addEventListener('mousemove', (event) => {
+    if (document.pointerLockElement === renderer?.domElement && camera) {
+      // Update yaw and pitch based on mouse movement
+      yaw -= event.movementX * 0.002;
+      pitch -= event.movementY * 0.002;
+      
+      // Clamp pitch to prevent camera flipping
+      pitch = Math.max(-Math.PI/2, Math.min(Math.PI/2, pitch));
+      
+      // Apply quaternion rotation to camera
+      const qx = new THREE.Quaternion();
+      qx.setFromAxisAngle(new THREE.Vector3(1, 0, 0), pitch);
+      
+      const qy = new THREE.Quaternion();
+      qy.setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
+      
+      const quaternion = new THREE.Quaternion();
+      quaternion.multiplyQuaternions(qy, qx);
+      
+      camera.quaternion.copy(quaternion);
+    }
+  });
+
   // Initialize camera position tracking
   lastCameraPosition.copy(camera.position);
   
   // Create terrain and setup GUI
-  terrainRenderer.generate(scene);
-  terrainRenderer.setupGUI(guiContainer, scene);
+  if (terrainRenderer) {
+    terrainRenderer.generate(scene);
+    if (guiContainer) {
+      terrainRenderer.setupGUI(guiContainer, scene);
+    }
+  }
   
   // Set initial performance settings
   updatePerformanceSettings();
@@ -583,7 +689,13 @@ export function setupRenderer(container: HTMLElement) {
   helpContainer.style.padding = '10px';
   helpContainer.style.borderRadius = '5px';
   helpContainer.style.fontFamily = 'Arial, sans-serif';
-  helpContainer.innerHTML = 'Click: Add Terrain<br>Shift+Click: Remove Terrain<br>' +
+  helpContainer.innerHTML = 'WASD: Move<br>' +
+                           'Space: Up<br>' +
+                           'Q: Down<br>' +
+                           'E/R: Rotate<br>' +
+                           'Shift: Run<br>' +
+                           'Click: Add Terrain<br>' +
+                           'Shift+Click: Remove Terrain<br>' +
                            '+/-: Increase/Decrease Render Distance<br>' +
                            'P: Cycle Performance Mode<br>' +
                            'C: Toggle Chunk Mode';
