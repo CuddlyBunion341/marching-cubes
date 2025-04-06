@@ -40,7 +40,7 @@ function App() {
                 alt="React logo" 
               />
             </a>
-            <a href="https://github.com/CuddlyBunion341/bun-threejs-boilerplate" target="_blank" className="pointer-events-auto relative group">
+            <a href="https://github.com/CuddlyBunion341/marching-cubes" target="_blank" className="pointer-events-auto relative group">
               <div className="absolute -inset-1 rounded-full bg-gradient-to-r from-gray-600 to-gray-800 opacity-0 group-hover:opacity-70 blur transition-all duration-300 group-hover:duration-200"></div>
               <img 
                 src={githubLogo} 

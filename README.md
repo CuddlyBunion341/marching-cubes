@@ -1,9 +1,9 @@
-# bun-threejs-boilerplate
+# marching-cubes
 
-Welcome to the **bun-threejs-boilerplate**! This template repository is crafted to help you quickly start your Three.js projects utilizing Bun and Vite tooling.
+Welcome to the **marching-cubes**! This template repository is crafted to help you quickly start your Three.js projects utilizing Bun and Vite tooling.
 
 ## Demo
-Check out the live demo at: [cb341.dev/bun-threejs-boilerplate](https:///cb341.dev/bun-threejs-boilerplate)
+Check out the live demo at: [cb341.dev/marching-cubes](https:///cb341.dev/marching-cubes)
 
 
 ## Features
@@ -44,12 +44,12 @@ To get started, follow these simple steps:
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/CuddlyBunion341/bun-threejs-boilerplate.git
+   git clone https://github.com/CuddlyBunion341/marching-cubes.git
    ```
 
 2. Navigate into the project directory and set up the project:
    ```bash
-   cd bun-threejs-boilerplate
+   cd marching-cubes
    bin/setup
    ```
 
