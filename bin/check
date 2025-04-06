@@ -1,0 +1,17 @@
+#!/bin/bash
+
+if ! command -v bun &> /dev/null; then
+    echo "bun could not be found"
+    echo "please install bun from https://bun.sh/docs/installation"
+    exit 1
+fi
+
+if [ ! -d "node_modules" ]; then
+    echo "node_modules does not exist, installing dependencies"
+    echo "please run bin/setup first"
+    exit 1
+fi
+
+bun lint
+bun test
+bunx tsc -b

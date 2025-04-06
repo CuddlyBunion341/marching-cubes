@@ -1,0 +1,9 @@
+#!/bin/bash
+
+if [ ! -d "node_modules" ]; then
+    echo "node_modules does not exist, installing dependencies"
+    echo "please run bin/setup first"
+    exit 1
+fi
+
+bun dev

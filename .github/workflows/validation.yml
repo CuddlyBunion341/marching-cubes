@@ -1,0 +1,21 @@
+name: Validation
+
+on:
+  push:
+    paths:
+      - 'src/**'
+      - 'test/**'
+      - '.github/workflows/validation.yml'
+  workflow_dispatch:
+
+jobs:
+  validation:
+    name: Linting and Checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+
+      - run: bun install
+      - run: bun lint
+      - run: bun test
