@@ -20,6 +20,11 @@ export class TerrainRenderer {
   private debugVoxels: THREE.Group | null = null;
   private scalarField: Float32Array | null = null;
   
+  // Add new properties for terrain modification
+  private brushSize: number = 0.5;
+  private brushStrength: number = 0.5;
+  private isAddingTerrain: boolean = true; // true for adding, false for removing
+  
   constructor(options: Partial<TerrainRendererOptions> = {}) {
     // Set default options
     this.options = {
@@ -192,6 +197,31 @@ export class TerrainRenderer {
       });
     }
     
+    // Add terrain editing controls
+    const editingFolder = this.gui.addFolder('Terrain Editing');
+    
+    // Create a separate object for the GUI controls
+    const editingParams = {
+      brushSize: this.brushSize,
+      brushStrength: this.brushStrength,
+      isAddingTerrain: this.isAddingTerrain
+    };
+    
+    // Brush size control
+    editingFolder.add(editingParams, 'brushSize', 0.5, 10.0).name('Brush Size').onChange((value: number) => {
+      this.setBrushSize(value);
+    });
+    
+    // Brush strength control
+    editingFolder.add(editingParams, 'brushStrength', 0.05, 1.0).name('Brush Strength').onChange((value: number) => {
+      this.setBrushStrength(value);
+    });
+    
+    // Brush mode control
+    editingFolder.add(editingParams, 'isAddingTerrain').name('Add Terrain (vs Remove)').onChange((value: boolean) => {
+      this.setBrushMode(value);
+    });
+    
     // Debug visualization folder
     const debugFolder = this.gui.addFolder('Debug');
     
@@ -253,5 +283,131 @@ export class TerrainRenderer {
       this.gui.destroy();
       this.gui = null;
     }
+  }
+  
+  // Add a method to modify the terrain at a world position with a sphere brush
+  modifyTerrain(worldPos: THREE.Vector3, isAdding: boolean = true): void {
+    if (!this.scalarField) return;
+    
+    const resolution = this.options.resolution;
+    const { minX, maxX, minY, maxY, minZ, maxZ } = this.mesher.getOptions().bounds;
+    
+    // Convert world position to grid space
+    const gridX = Math.floor(((worldPos.x - minX) / (maxX - minX)) * (resolution - 1));
+    const gridY = Math.floor(((worldPos.y - minY) / (maxY - minY)) * (resolution - 1));
+    const gridZ = Math.floor(((worldPos.z - minZ) / (maxZ - minZ)) * (resolution - 1));
+    
+    // Calculate grid cell size
+    const cellSizeX = (maxX - minX) / (resolution - 1);
+    const cellSizeY = (maxY - minY) / (resolution - 1);
+    const cellSizeZ = (maxZ - minZ) / (resolution - 1);
+    
+    // Calculate brush radius in grid cells
+    const brushRadiusGrid = this.brushSize / Math.min(cellSizeX, cellSizeY, cellSizeZ);
+    
+    // Determine affected grid cells
+    const radiusCeil = Math.ceil(brushRadiusGrid);
+    const minGridX = Math.max(0, gridX - radiusCeil);
+    const maxGridX = Math.min(resolution - 1, gridX + radiusCeil);
+    const minGridY = Math.max(0, gridY - radiusCeil);
+    const maxGridY = Math.min(resolution - 1, gridY + radiusCeil);
+    const minGridZ = Math.max(0, gridZ - radiusCeil);
+    const maxGridZ = Math.min(resolution - 1, gridZ + radiusCeil);
+    
+    // Modify terrain density values within the brush radius
+    for (let z = minGridZ; z <= maxGridZ; z++) {
+      for (let y = minGridY; y <= maxGridY; y++) {
+        for (let x = minGridX; x <= maxGridX; x++) {
+          // Calculate distance from brush center to this voxel
+          const dx = x - gridX;
+          const dy = y - gridY;
+          const dz = z - gridZ;
+          const distSquared = dx * dx + dy * dy + dz * dz;
+          
+          // If within brush sphere radius
+          if (distSquared <= brushRadiusGrid * brushRadiusGrid) {
+            // Calculate falloff based on distance from center (smooth transition at edges)
+            const distance = Math.sqrt(distSquared);
+            const falloff = 1.0 - Math.min(1.0, distance / brushRadiusGrid);
+            
+            // Calculate influence with falloff
+            const influence = this.brushStrength * falloff * falloff; // Squared falloff for smoother brush
+            
+            // Update density value
+            const index = x + y * resolution + z * resolution * resolution;
+            if (index >= 0 && index < this.scalarField.length) {
+              if (isAdding) {
+                // Subtract from value to add terrain (counter-intuitive but correct for marching cubes)
+                this.scalarField[index] -= influence;
+              } else {
+                // Add to value to remove terrain
+                this.scalarField[index] += influence;
+              }
+            }
+          }
+        }
+      }
+    }
+    
+    // Regenerate mesh with modified scalar field
+    this.updateMesh();
+  }
+  
+  // Update the mesh based on the current scalar field
+  updateMesh(): void {
+    if (!this.scalarField || !this.mesh) return;
+    
+    const resolution = this.options.resolution;
+    const geometry = this.mesher.generateMesh(
+      this.scalarField, resolution, resolution, resolution
+    );
+    
+    // Update mesh geometry
+    if (this.mesh.geometry) {
+      this.mesh.geometry.dispose();
+    }
+    this.mesh.geometry = geometry;
+    
+    // If debug voxels are visible, update them too
+    if (this.debugVoxels && this.debugVoxels.parent) {
+      const scene = this.debugVoxels.parent as THREE.Scene;
+      this.toggleDebugVoxels(scene, false);
+      this.toggleDebugVoxels(scene, true);
+    }
+  }
+  
+  // Get brush size
+  getBrushSize(): number {
+    return this.brushSize;
+  }
+  
+  // Set brush size
+  setBrushSize(size: number): void {
+    this.brushSize = Math.max(0.5, size);
+  }
+  
+  // Get brush strength
+  getBrushStrength(): number {
+    return this.brushStrength;
+  }
+  
+  // Set brush strength
+  setBrushStrength(strength: number): void {
+    this.brushStrength = Math.max(0.05, Math.min(1.0, strength));
+  }
+  
+  // Set brush mode (add or remove)
+  setBrushMode(isAdding: boolean): void {
+    this.isAddingTerrain = isAdding;
+  }
+  
+  // Get brush mode
+  getBrushMode(): boolean {
+    return this.isAddingTerrain;
+  }
+
+  // Add getter for the mesh
+  get terrainMesh(): THREE.Mesh | null {
+    return this.mesh;
   }
 } 
