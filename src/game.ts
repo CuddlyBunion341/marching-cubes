@@ -79,13 +79,22 @@ export function setupRenderer(container: HTMLElement) {
     material: new THREE.MeshPhongMaterial({
       color: 0x44aa88,
       shininess: 30,
-      flatShading: true
-    })
+      flatShading: true,
+      side: THREE.DoubleSide,
+      shadowSide: THREE.DoubleSide,
+      transparent: false,
+      opacity: 1.0,
+    }),
+    marchingCubesOptions: {
+      seamless: true,
+      doubleSided: true,
+      isoLevel: 0.0,
+    }
   });
 
   // Create terrain and setup GUI
   terrainRenderer.generate(scene);
-  terrainRenderer.setupGUI(guiContainer);
+  terrainRenderer.setupGUI(guiContainer, scene);
 
   window.addEventListener('resize', onWindowResize);
 }
