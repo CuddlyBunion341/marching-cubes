@@ -3,6 +3,9 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TerrainRenderer } from './terrain/TerrainRenderer';
 
 const scene = new THREE.Scene();
+// Add fog to the scene for a more seamless world
+scene.fog = new THREE.FogExp2(0x87CEEB, 0.01); // Sky blue color with exponential fog
+
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
 
 // Setup lighting
@@ -496,11 +499,17 @@ export function setupRenderer(container: HTMLElement) {
     renderer.dispose();
   }
 
-  // Setup renderer
-  renderer = new THREE.WebGLRenderer({ antialias: true });
+  // Create WebGL renderer
+  renderer = new THREE.WebGLRenderer({
+    antialias: true,
+    alpha: false,
+    powerPreference: 'high-performance'
+  });
   renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setPixelRatio(window.devicePixelRatio);
+  // Set background color to match fog color for seamless transition
+  renderer.setClearColor(0x87CEEB, 1);
   renderer.setAnimationLoop(animate);
-  renderer.setClearColor(0x87ceeb); // Sky blue background
   container.appendChild(renderer.domElement);
 
   // Setup controls
