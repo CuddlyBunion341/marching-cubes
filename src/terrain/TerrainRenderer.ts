@@ -657,22 +657,45 @@ export class TerrainRenderer {
   
   // Set performance mode and adjust settings accordingly
   setPerformanceMode(mode: 'high' | 'medium' | 'low'): void {
+    if (this.performanceMode === mode) return;
+    
     this.performanceMode = mode;
     
-    // Adjust settings based on mode
+    // Adjust update throttle based on performance mode
     switch (mode) {
       case 'high':
-        // High quality, slower updates
-        this.updateThrottleMs = this.maxUpdateThrottleMs;
-        break;
-      case 'medium':
-        // Balance between quality and speed
-        this.updateThrottleMs = Math.floor((this.minUpdateThrottleMs + this.maxUpdateThrottleMs) / 2);
-        break;
-      case 'low':
-        // Lower quality, faster updates
         this.updateThrottleMs = this.minUpdateThrottleMs;
         break;
+      case 'medium':
+        this.updateThrottleMs = (this.minUpdateThrottleMs + this.maxUpdateThrottleMs) / 2;
+        break;
+      case 'low':
+        this.updateThrottleMs = this.maxUpdateThrottleMs;
+        break;
+    }
+    
+    // If using chunked terrain, also adjust chunk settings
+    if (this.options.useChunks && this.chunkManager) {
+      // Adjust settings based on mode
+      switch (mode) {
+        case 'high':
+          // High quality - default chunk resolution
+          break;
+        case 'medium':
+          // Medium quality - might reduce render distance
+          if (this.options.renderDistance > 3) {
+            this.options.renderDistance = 3;
+            this.chunkManager.setRenderDistance(3);
+          }
+          break;
+        case 'low':
+          // Low quality - reduce render distance
+          if (this.options.renderDistance > 2) {
+            this.options.renderDistance = 2;
+            this.chunkManager.setRenderDistance(2);
+          }
+          break;
+      }
     }
   }
 
@@ -682,5 +705,58 @@ export class TerrainRenderer {
       return this.chunkManager.getChunkGroup();
     }
     return this.mesh;
+  }
+  
+  // NEW METHOD: Adjust render distance based on performance
+  adjustRenderDistance(performanceRating: number): void {
+    if (!this.options.useChunks || !this.chunkManager) return;
+    
+    // performanceRating should be between 0 (awful) and 1 (excellent)
+    let optimalRenderDistance: number;
+    
+    if (performanceRating < 0.3) {
+      // Poor performance - reduce render distance
+      optimalRenderDistance = 2;
+      this.setPerformanceMode('low');
+    } else if (performanceRating < 0.6) {
+      // Medium performance
+      optimalRenderDistance = 3;
+      this.setPerformanceMode('medium');
+    } else {
+      // Good performance
+      optimalRenderDistance = Math.min(5, this.options.renderDistance);
+      this.setPerformanceMode('high');
+    }
+    
+    // Only update if different from current setting
+    if (optimalRenderDistance !== this.options.renderDistance) {
+      this.options.renderDistance = optimalRenderDistance;
+      this.chunkManager.setRenderDistance(optimalRenderDistance);
+      console.log(`Adjusted render distance to ${optimalRenderDistance} based on performance`);
+    }
+  }
+  
+  // NEW METHOD: Get current chunk count - useful for debugging
+  getChunkCount(): number {
+    if (this.chunkManager) {
+      return (this.chunkManager as any).chunks.size;
+    }
+    return 0;
+  }
+  
+  // NEW METHOD: Get worker count - useful for debugging
+  getWorkerCount(): number {
+    if (this.chunkManager) {
+      return (this.chunkManager as any).workers.length;
+    }
+    return 0;
+  }
+  
+  // NEW METHOD: Get chunks in queue - useful for debugging
+  getQueueSize(): number {
+    if (this.chunkManager) {
+      return (this.chunkManager as any).chunkQueue.length;
+    }
+    return 0;
   }
 } 

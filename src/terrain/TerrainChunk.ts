@@ -23,7 +23,7 @@ export class TerrainChunk {
   public chunkPosition: THREE.Vector3;
   private dirtyRegion: { min: THREE.Vector3, max: THREE.Vector3 } | null = null;
   
-  constructor(options: TerrainChunkOptions, noiseGenerator: NoiseGenerator) {
+  constructor(options: TerrainChunkOptions, noiseGenerator: NoiseGenerator, generateMeshImmediately = true) {
     this.options = options;
     this.chunkPosition = options.position.clone();
     
@@ -39,8 +39,10 @@ export class TerrainChunk {
     // Generate initial scalar field for this chunk
     this.scalarField = this.generateScalarField(noiseGenerator);
     
-    // Generate the initial mesh
-    this.generateMesh();
+    // Generate the initial mesh if requested
+    if (generateMeshImmediately) {
+      this.generateMesh();
+    }
   }
   
   // Calculate the world bounds of this chunk
@@ -58,6 +60,17 @@ export class TerrainChunk {
       minZ: posZ - halfSize,
       maxZ: posZ + halfSize
     };
+  }
+  
+  // Get the bounds of this chunk (for worker)
+  getBounds() {
+    return this.calculateChunkBounds();
+  }
+  
+  // Get the scalar field (for worker)
+  getScalarField(): Float32Array {
+    // Create a copy to avoid issues with transferring the original
+    return new Float32Array(this.scalarField);
   }
   
   // Generate the scalar field for this chunk using the noise generator
@@ -89,6 +102,45 @@ export class TerrainChunk {
       resolution,
       this.dirtyRegion || undefined
     );
+    
+    // Reset dirty flag and region
+    this.isDirty = false;
+    this.dirtyRegion = null;
+    
+    // Create or update the mesh
+    if (this.mesh) {
+      if (this.mesh.geometry) {
+        this.mesh.geometry.dispose();
+      }
+      this.mesh.geometry = this.geometry;
+    } else {
+      this.mesh = new THREE.Mesh(this.geometry, this.options.material);
+      // Set position to match world location
+      const position = this.calculateChunkPosition();
+      this.mesh.position.copy(position);
+    }
+  }
+  
+  // Update mesh from worker-generated data
+  updateMeshFromData(positions: Float32Array, normals: Float32Array, indices: Uint32Array): void {
+    // Create a new geometry
+    const geometry = new THREE.BufferGeometry();
+    
+    // Set attributes
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+    geometry.setIndex(new THREE.Uint32BufferAttribute(indices, 1));
+    
+    // Update bounds
+    geometry.computeBoundingSphere();
+    
+    // If we had a previous geometry, dispose it
+    if (this.geometry) {
+      this.geometry.dispose();
+    }
+    
+    // Store the new geometry
+    this.geometry = geometry;
     
     // Reset dirty flag and region
     this.isDirty = false;
@@ -249,16 +301,30 @@ export class TerrainChunk {
   couldBeAffected(worldPos: THREE.Vector3, brushSize: number): boolean {
     const bounds = this.calculateChunkBounds();
     
-    // Calculate the minimum distance from the brush center to the chunk bounds
-    const distX = Math.max(bounds.minX - worldPos.x, 0, worldPos.x - bounds.maxX);
-    const distY = Math.max(bounds.minY - worldPos.y, 0, worldPos.y - bounds.maxY);
-    const distZ = Math.max(bounds.minZ - worldPos.z, 0, worldPos.z - bounds.maxZ);
+    // Calculate distance from chunk center to position
+    const chunkCenterX = (bounds.minX + bounds.maxX) / 2;
+    const chunkCenterY = (bounds.minY + bounds.maxY) / 2;
+    const chunkCenterZ = (bounds.minZ + bounds.maxZ) / 2;
     
-    // If the minimum distance is less than the brush size, the chunk could be affected
-    return (distX * distX + distY * distY + distZ * distZ) <= (brushSize * brushSize);
+    const dx = worldPos.x - chunkCenterX;
+    const dy = worldPos.y - chunkCenterY;
+    const dz = worldPos.z - chunkCenterZ;
+    
+    // Calculate distance to chunk center
+    const distSq = dx * dx + dy * dy + dz * dz;
+    
+    // Calculate chunk's bounding sphere radius
+    const chunkRadius = Math.sqrt(
+      Math.pow(bounds.maxX - bounds.minX, 2) / 4 +
+      Math.pow(bounds.maxY - bounds.minY, 2) / 4 +
+      Math.pow(bounds.maxZ - bounds.minZ, 2) / 4
+    );
+    
+    // Check if brush (with its radius) could affect chunk
+    return Math.sqrt(distSq) <= chunkRadius + brushSize;
   }
   
-  // Set visibility of this chunk
+  // Set chunk visibility
   setVisible(visible: boolean): void {
     this.isVisible = visible;
     if (this.mesh) {
@@ -266,7 +332,7 @@ export class TerrainChunk {
     }
   }
   
-  // Check if this chunk is visible
+  // Check if chunk is visible
   isChunkVisible(): boolean {
     return this.isVisible;
   }

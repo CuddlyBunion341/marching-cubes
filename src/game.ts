@@ -89,21 +89,16 @@ function monitorPerformance() {
       if (fpsHistory.length > 30 && terrainRenderer) {
         const avgFPS = fpsHistory.reduce((sum, fps) => sum + fps, 0) / fpsHistory.length;
         
-        // If performance is poor (less than 20 FPS), downgrade to lower quality
-        if (avgFPS < 20 && (terrainRenderer as any).performanceMode !== 'low') {
-          (terrainRenderer as any).setPerformanceMode('low');
-          updatePerformanceSettings();
-          console.log('Performance poor, switched to low quality mode');
-          
-          // Also show a brief notification to the user
-          showPerformanceNotification('Performance poor, switched to low quality mode');
-        }
+        // Calculate a performance rating between 0 and 1
+        // Assuming 60 FPS is optimal and 10 FPS is terrible
+        const performanceRating = Math.min(1, Math.max(0, (avgFPS - 10) / 50));
         
-        // If performance is good (more than 50 FPS), can try to upgrade quality
-        else if (avgFPS > 50 && (terrainRenderer as any).performanceMode === 'low') {
-          (terrainRenderer as any).setPerformanceMode('medium');
-          updatePerformanceSettings();
-          console.log('Performance good, switched to medium quality mode');
+        // Adjust settings based on performance rating
+        terrainRenderer.adjustRenderDistance(performanceRating);
+        
+        // Show debug info
+        if (debugInfoEnabled) {
+          updateDebugInfo(avgFPS, performanceRating);
         }
         
         // Reset history after adjusting
@@ -113,6 +108,57 @@ function monitorPerformance() {
   }
   
   lastFrameTime = now;
+}
+
+// Add a debug info display
+let debugInfoEnabled = false;
+let debugInfoElement: HTMLElement | null = null;
+
+function toggleDebugInfo() {
+  debugInfoEnabled = !debugInfoEnabled;
+  
+  if (debugInfoEnabled) {
+    if (!debugInfoElement) {
+      debugInfoElement = document.createElement('div');
+      debugInfoElement.style.position = 'absolute';
+      debugInfoElement.style.top = '10px';
+      debugInfoElement.style.right = '10px';
+      debugInfoElement.style.backgroundColor = 'rgba(0,0,0,0.7)';
+      debugInfoElement.style.color = 'white';
+      debugInfoElement.style.padding = '10px';
+      debugInfoElement.style.borderRadius = '5px';
+      debugInfoElement.style.fontFamily = 'monospace';
+      debugInfoElement.style.fontSize = '12px';
+      debugInfoElement.style.zIndex = '1000';
+      
+      if (renderer) {
+        renderer.domElement.parentElement?.appendChild(debugInfoElement);
+      }
+    }
+    updateDebugInfo(0, 0);
+  } else if (debugInfoElement && debugInfoElement.parentElement) {
+    debugInfoElement.parentElement.removeChild(debugInfoElement);
+  }
+}
+
+function updateDebugInfo(fps: number, performanceRating: number) {
+  if (!debugInfoElement || !terrainRenderer) return;
+  
+  const chunkCount = terrainRenderer.getChunkCount();
+  const workerCount = terrainRenderer.getWorkerCount();
+  const queueSize = terrainRenderer.getQueueSize();
+  const renderDistance = (terrainRenderer as any).options.renderDistance;
+  const performanceMode = (terrainRenderer as any).performanceMode;
+  
+  debugInfoElement.innerHTML = `
+    <div>FPS: ${fps.toFixed(1)}</div>
+    <div>Performance: ${(performanceRating * 100).toFixed(0)}%</div>
+    <div>Mode: ${performanceMode}</div>
+    <div>Render Distance: ${renderDistance}</div>
+    <div>Chunk Count: ${chunkCount}</div>
+    <div>Workers: ${workerCount}</div>
+    <div>Queue Size: ${queueSize}</div>
+  `;
 }
 
 // Show a brief notification to the user
@@ -231,6 +277,11 @@ function onKeyDown(event: KeyboardEvent) {
   if (event.key === "Shift") {
     isShiftDown = true;
     editMode = "remove";
+  }
+  
+  // Toggle debug info with F3 key
+  if (event.key === "F3") {
+    toggleDebugInfo();
   }
   
   // Additional key controls for chunk system
