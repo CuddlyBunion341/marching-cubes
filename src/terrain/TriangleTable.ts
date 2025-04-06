@@ -235,7 +235,7 @@ export const TRIANGLE_TABLE: number[][] = [
   [4, 11, 7, 4, 9, 11, 9, 10, 11, -1],  // Case 224: Corners 5,6,7 below iso-level
   [0, 8, 3, 4, 9, 7, 9, 11, 7, 9, 10, 11, -1],  // Case 225: Corners 0,5,6,7 below iso-level
   [1, 10, 11, 1, 11, 4, 1, 4, 0, 7, 4, 11, -1],  // Case 226: Corners 1,5,6,7 below iso-level
-  [3, 1, 4, 3, 4, 8, 1, 10, 4, 7, 4, 11, 10, 11, 4, -1],  // Case 227: Corners 0,1,5,6,7 below iso-level
+  [3, 1, 4, 3, 4, 8, 1, 7, 10, 7, 11, 10, -1],  // Case 227: Corners 0,1,5,6,7 below iso-level
   [4, 11, 7, 9, 11, 4, 9, 2, 11, 9, 1, 2, -1],  // Case 228: Corners 2,5,6,7 below iso-level
   [9, 7, 4, 9, 11, 7, 9, 1, 11, 2, 11, 1, 0, 8, 3, -1],  // Case 229: Corners 0,2,5,6,7 below iso-level
   [11, 7, 4, 11, 4, 2, 2, 4, 0, -1],  // Case 230: Corners 1,2,5,6,7 below iso-level
@@ -265,8 +265,3 @@ export const TRIANGLE_TABLE: number[][] = [
   [0, 3, 8, -1],  // Case 254: Corners 1,2,3,4,5,6,7 below iso-level
   [-1]   // Case 255: All corners below iso-level
 ];
-
-// Generate remaining cases programmatically to avoid exceeding token limits
-// for (let i = 128; i < 256; i++) {
-//   TRIANGLE_TABLE[i] = [-1]; // Placeholder value, should be properly defined
-// } 
