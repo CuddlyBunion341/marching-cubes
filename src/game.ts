@@ -31,6 +31,118 @@ let editMode = "add"; // "add" or "remove"
 let lastRaycastPoint: THREE.Vector3 | null = null;
 let raycastIndicator: THREE.Mesh | null = null;
 
+// Add optimization variables
+let raycastThrottleMs = 16; // About 60fps
+let lastRaycastTime = 0;
+let pendingRaycast = false;
+let moveEvent: MouseEvent | null = null;
+
+// Add variables for tracking camera movement
+let lastCameraPosition = new THREE.Vector3();
+let chunkUpdateDistance = 10; // Distance the camera needs to move before updating chunks
+
+// Performance settings
+function updatePerformanceSettings() {
+  if (!terrainRenderer) return;
+  
+  // Get performance mode from terrain renderer
+  const mode = (terrainRenderer as any).performanceMode;
+  
+  if (mode === 'high') {
+    raycastThrottleMs = 100; // Slower updates (10fps)
+  } else if (mode === 'medium') {
+    raycastThrottleMs = 33; // Medium updates (30fps)
+  } else if (mode === 'low') {
+    raycastThrottleMs = 16; // Fast updates (60fps)
+  }
+}
+
+// Performance monitoring
+let fpsHistory: number[] = [];
+let lastPerformanceCheck = 0;
+let performanceCheckInterval = 5000; // Check every 5 seconds
+let lastFrameTime = 0;
+
+function monitorPerformance() {
+  const now = performance.now();
+  
+  // Calculate current FPS
+  if (lastFrameTime > 0) {
+    const deltaTime = now - lastFrameTime;
+    const currentFPS = 1000 / deltaTime;
+    
+    // Only track FPS when editing is happening
+    if (isMouseDown) {
+      fpsHistory.push(currentFPS);
+      
+      // Keep history to last 60 frames
+      if (fpsHistory.length > 60) {
+        fpsHistory.shift();
+      }
+    }
+    
+    // Check performance periodically
+    if (now - lastPerformanceCheck > performanceCheckInterval) {
+      lastPerformanceCheck = now;
+      
+      // Only adjust if we have enough data and we're actively editing
+      if (fpsHistory.length > 30 && terrainRenderer) {
+        const avgFPS = fpsHistory.reduce((sum, fps) => sum + fps, 0) / fpsHistory.length;
+        
+        // If performance is poor (less than 20 FPS), downgrade to lower quality
+        if (avgFPS < 20 && (terrainRenderer as any).performanceMode !== 'low') {
+          (terrainRenderer as any).setPerformanceMode('low');
+          updatePerformanceSettings();
+          console.log('Performance poor, switched to low quality mode');
+          
+          // Also show a brief notification to the user
+          showPerformanceNotification('Performance poor, switched to low quality mode');
+        }
+        
+        // If performance is good (more than 50 FPS), can try to upgrade quality
+        else if (avgFPS > 50 && (terrainRenderer as any).performanceMode === 'low') {
+          (terrainRenderer as any).setPerformanceMode('medium');
+          updatePerformanceSettings();
+          console.log('Performance good, switched to medium quality mode');
+        }
+        
+        // Reset history after adjusting
+        fpsHistory = [];
+      }
+    }
+  }
+  
+  lastFrameTime = now;
+}
+
+// Show a brief notification to the user
+function showPerformanceNotification(message: string) {
+  if (!renderer) return;
+  
+  const notification = document.createElement('div');
+  notification.textContent = message;
+  notification.style.position = 'absolute';
+  notification.style.bottom = '50px';
+  notification.style.left = '50%';
+  notification.style.transform = 'translateX(-50%)';
+  notification.style.backgroundColor = 'rgba(0,0,0,0.7)';
+  notification.style.color = 'white';
+  notification.style.padding = '10px 20px';
+  notification.style.borderRadius = '5px';
+  notification.style.fontFamily = 'Arial, sans-serif';
+  notification.style.fontSize = '14px';
+  notification.style.zIndex = '1000';
+  
+  renderer.domElement.parentElement?.appendChild(notification);
+  
+  // Remove after a few seconds
+  setTimeout(() => {
+    if (notification.parentElement) {
+      notification.parentElement.removeChild(notification);
+    }
+  }, 3000);
+}
+
 function animate() {
   if (renderer) {
     renderer.render(scene, camera);
@@ -40,9 +152,27 @@ function animate() {
     controls.update();
   }
   
-  // Update raycast on mouse move when pressed
-  if (isMouseDown && terrainRenderer && terrainRenderer.terrainMesh) {
-    updateRaycasting();
+  // Update chunks when camera moves significantly
+  if (terrainRenderer && camera) {
+    // Check if camera has moved enough to update chunks
+    if (lastCameraPosition.distanceTo(camera.position) > chunkUpdateDistance) {
+      updateChunksAroundCamera();
+      lastCameraPosition.copy(camera.position);
+    }
+  }
+  
+  // Monitor performance
+  monitorPerformance();
+  
+  // Update raycast on mouse move when pressed - but throttled
+  if (isMouseDown && terrainRenderer && terrainRenderer.terrainMesh && moveEvent) {
+    const currentTime = performance.now();
+    if (currentTime - lastRaycastTime >= raycastThrottleMs) {
+      lastRaycastTime = currentTime;
+      updateMousePosition(moveEvent);
+      updateRaycasting();
+      moveEvent = null; // Clear the event after processing
+    }
   }
 }
 
@@ -51,12 +181,46 @@ function onMouseDown(event: MouseEvent) {
   if (!controls || !terrainRenderer || !terrainRenderer.terrainMesh) return;
   
   isMouseDown = true;
+  lastRaycastPoint = null; // Reset last point when starting a new stroke
   updateMousePosition(event);
   updateRaycasting();
 }
 
 function onMouseMove(event: MouseEvent) {
+  // Just store the latest move event, will be processed in animate
+  moveEvent = event;
+  
+  // Always update the mouse position for raycasting indicator
   updateMousePosition(event);
+  
+  // But only schedule raycasting if mouse is down and not already pending
+  if (isMouseDown && !pendingRaycast) {
+    scheduleRaycast();
+  }
+}
+
+function scheduleRaycast() {
+  if (pendingRaycast) return;
+  
+  const currentTime = performance.now();
+  const elapsed = currentTime - lastRaycastTime;
+  
+  if (elapsed >= raycastThrottleMs) {
+    // Do it immediately
+    updateRaycasting();
+    lastRaycastTime = currentTime;
+  } else {
+    // Schedule it
+    pendingRaycast = true;
+    setTimeout(() => {
+      pendingRaycast = false;
+      if (isMouseDown && moveEvent) {
+        updateMousePosition(moveEvent);
+        updateRaycasting();
+        lastRaycastTime = performance.now();
+      }
+    }, raycastThrottleMs - elapsed);
+  }
 }
 
 function onMouseUp() {
@@ -67,6 +231,52 @@ function onKeyDown(event: KeyboardEvent) {
   if (event.key === "Shift") {
     isShiftDown = true;
     editMode = "remove";
+  }
+  
+  // Additional key controls for chunk system
+  if (terrainRenderer) {
+    // Get access to the chunk manager
+    const chunkManager = (terrainRenderer as any).chunkManager;
+    
+    switch (event.key) {
+      case '+': // Increase render distance
+        if (chunkManager) {
+          const currentDistance = (terrainRenderer as any).options.renderDistance;
+          const newDistance = Math.min(10, currentDistance + 1);
+          (terrainRenderer as any).options.renderDistance = newDistance;
+          chunkManager.setRenderDistance(newDistance);
+          showNotification(`Render distance: ${newDistance}`);
+        }
+        break;
+        
+      case '-': // Decrease render distance
+        if (chunkManager) {
+          const currentDistance = (terrainRenderer as any).options.renderDistance;
+          const newDistance = Math.max(1, currentDistance - 1);
+          (terrainRenderer as any).options.renderDistance = newDistance;
+          chunkManager.setRenderDistance(newDistance);
+          showNotification(`Render distance: ${newDistance}`);
+        }
+        break;
+        
+      case 'p': // Toggle performance mode
+        const currentMode = (terrainRenderer as any).performanceMode;
+        let newMode;
+        if (currentMode === 'high') newMode = 'medium';
+        else if (currentMode === 'medium') newMode = 'low';
+        else newMode = 'high';
+        
+        (terrainRenderer as any).setPerformanceMode(newMode);
+        updatePerformanceSettings();
+        showNotification(`Performance mode: ${newMode}`);
+        break;
+        
+      case 'c': // Toggle chunk mode
+        (terrainRenderer as any).options.useChunks = !(terrainRenderer as any).options.useChunks;
+        terrainRenderer.regenerate(scene);
+        showNotification(`Chunk mode: ${(terrainRenderer as any).options.useChunks ? 'ON' : 'OFF'}`);
+        break;
+    }
   }
 }
 
@@ -94,9 +304,34 @@ function updateRaycasting() {
   raycaster.setFromCamera(mouse, camera);
   
   // Check for intersections with the terrain
-  const intersects = raycaster.intersectObject(terrainRenderer.terrainMesh);
+  let intersects;
   
-  if (intersects.length > 0) {
+  // Chunked terrain will be a Group, monolithic will be a Mesh
+  if (terrainRenderer.terrainMesh instanceof THREE.Group) {
+    // Raycast against all children in the group (chunks)
+    const chunks = terrainRenderer.terrainMesh.children;
+    intersects = [];
+    
+    for (const chunk of chunks) {
+      // Only raycast against visible chunks for performance
+      if (chunk.visible) {
+        const chunkIntersects = raycaster.intersectObject(chunk);
+        if (chunkIntersects.length > 0) {
+          intersects.push(...chunkIntersects);
+        }
+      }
+    }
+    
+    // Sort intersections by distance
+    if (intersects.length > 1) {
+      intersects.sort((a, b) => a.distance - b.distance);
+    }
+  } else {
+    // Monolithic terrain - just raycast against the single mesh
+    intersects = raycaster.intersectObject(terrainRenderer.terrainMesh);
+  }
+  
+  if (intersects && intersects.length > 0) {
     // Get the point of intersection
     const point = intersects[0].point;
     
@@ -104,11 +339,13 @@ function updateRaycasting() {
     if (controls && !controls.enableRotate) return;
     
     // Don't modify terrain repeatedly at the same position
-    if (lastRaycastPoint && point.distanceTo(lastRaycastPoint) < 0.1) return;
+    // Use a distance threshold based on brush size for better performance
+    const minMoveDistance = terrainRenderer.getBrushSize() * 0.2;
+    if (lastRaycastPoint && point.distanceTo(lastRaycastPoint) < minMoveDistance) return;
     
     // Store last position
     lastRaycastPoint = point.clone();
-
+    
     // Modify terrain
     terrainRenderer.modifyTerrain(point, editMode === "add");
     
@@ -152,6 +389,54 @@ function onWindowResize() {
   if (renderer) {
     renderer.setSize(window.innerWidth, window.innerHeight);
   }
+}
+
+// Update chunks around the camera position
+function updateChunksAroundCamera() {
+  if (!terrainRenderer) return;
+  
+  // Access the chunk manager through the terrain renderer
+  const chunkManager = (terrainRenderer as any).chunkManager;
+  if (chunkManager) {
+    // Generate chunks around camera position
+    chunkManager.generateChunksAroundPosition(camera.position);
+  }
+}
+
+// Show a simple notification
+function showNotification(message: string) {
+  if (!renderer) return;
+  
+  // Remove any existing notification
+  const existingNotification = document.getElementById('terrain-notification');
+  if (existingNotification && existingNotification.parentElement) {
+    existingNotification.parentElement.removeChild(existingNotification);
+  }
+  
+  // Create new notification
+  const notification = document.createElement('div');
+  notification.id = 'terrain-notification';
+  notification.textContent = message;
+  notification.style.position = 'absolute';
+  notification.style.bottom = '100px';
+  notification.style.left = '50%';
+  notification.style.transform = 'translateX(-50%)';
+  notification.style.backgroundColor = 'rgba(0,0,0,0.7)';
+  notification.style.color = 'white';
+  notification.style.padding = '10px 20px';
+  notification.style.borderRadius = '5px';
+  notification.style.fontFamily = 'Arial, sans-serif';
+  notification.style.fontSize = '14px';
+  notification.style.zIndex = '1001';
+  
+  renderer.domElement.parentElement?.appendChild(notification);
+  
+  // Remove after a few seconds
+  setTimeout(() => {
+    if (notification.parentElement) {
+      notification.parentElement.removeChild(notification);
+    }
+  }, 2000);
 }
 
 export function setupRenderer(container: HTMLElement) {
@@ -202,12 +487,23 @@ export function setupRenderer(container: HTMLElement) {
       seamless: true,
       doubleSided: true,
       isoLevel: 0.0,
-    }
+    },
+    // Add chunk options
+    useChunks: true,
+    chunkSize: 20,
+    chunkResolution: 24,
+    renderDistance: 4
   });
 
+  // Initialize camera position tracking
+  lastCameraPosition.copy(camera.position);
+  
   // Create terrain and setup GUI
   terrainRenderer.generate(scene);
   terrainRenderer.setupGUI(guiContainer, scene);
+  
+  // Set initial performance settings
+  updatePerformanceSettings();
 
   // Add event listeners for interaction
   window.addEventListener('resize', onWindowResize);
@@ -227,7 +523,10 @@ export function setupRenderer(container: HTMLElement) {
   helpContainer.style.padding = '10px';
   helpContainer.style.borderRadius = '5px';
   helpContainer.style.fontFamily = 'Arial, sans-serif';
-  helpContainer.innerHTML = 'Click: Add Terrain<br>Shift+Click: Remove Terrain';
+  helpContainer.innerHTML = 'Click: Add Terrain<br>Shift+Click: Remove Terrain<br>' +
+                           '+/-: Increase/Decrease Render Distance<br>' +
+                           'P: Cycle Performance Mode<br>' +
+                           'C: Toggle Chunk Mode';
   container.appendChild(helpContainer);
 }
 

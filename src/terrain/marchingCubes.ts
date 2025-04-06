@@ -38,6 +38,10 @@ export class MarchingCubes {
   private options: MarchingCubesOptions;
   private vertexCache: Map<string, number>; // Cache for vertex reuse
   private debugMesh: THREE.Mesh | null = null;
+  
+  // Add optimization properties
+  private cachedGeometry: THREE.BufferGeometry | null = null;
+  private cachedScalarField: Float32Array | null = null;
 
   constructor(options: Partial<MarchingCubesOptions> = {}) {
     this.options = {
@@ -540,5 +544,104 @@ export class MarchingCubes {
   // Get current options
   getOptions(): MarchingCubesOptions {
     return { ...this.options };
+  }
+
+  // New method to generate mesh with optimizations for partial updates
+  generateMeshOptimized(
+    scalarField: Float32Array, 
+    sizeX: number, 
+    sizeY: number, 
+    sizeZ: number,
+    dirtyRegion?: { min: THREE.Vector3, max: THREE.Vector3 }
+  ): THREE.BufferGeometry {
+    // If no dirty region or complete regeneration needed, use the full method
+    if (!dirtyRegion || !this.cachedGeometry || !this.cachedScalarField ||
+        this.cachedScalarField.length !== scalarField.length) {
+      
+      // Store the current scalar field for future partial updates
+      this.cachedScalarField = new Float32Array(scalarField);
+      this.cachedGeometry = this.generateMesh(scalarField, sizeX, sizeY, sizeZ);
+      return this.cachedGeometry;
+    }
+    
+    // Compare scalar fields to see if anything has actually changed
+    let hasChanges = false;
+    
+    // Use dirty region to only check values in the affected area
+    const min = dirtyRegion.min;
+    const max = dirtyRegion.max;
+    
+    // Add a margin around the dirty region to ensure no missed surfaces
+    const margin = 2;
+    const minX = Math.max(0, Math.floor(min.x) - margin);
+    const minY = Math.max(0, Math.floor(min.y) - margin);
+    const minZ = Math.max(0, Math.floor(min.z) - margin);
+    const maxX = Math.min(sizeX - 1, Math.ceil(max.x) + margin);
+    const maxY = Math.min(sizeY - 1, Math.ceil(max.y) + margin);
+    const maxZ = Math.min(sizeZ - 1, Math.ceil(max.z) + margin);
+    
+    // Check if values have changed in the dirty region
+    for (let z = minZ; z <= maxZ; z++) {
+      for (let y = minY; y <= maxY; y++) {
+        for (let x = minX; x <= maxX; x++) {
+          const index = x + y * sizeX + z * sizeX * sizeY;
+          if (index >= 0 && index < scalarField.length && 
+              Math.abs(this.cachedScalarField[index] - scalarField[index]) > 0.0001) {
+            hasChanges = true;
+            break;
+          }
+        }
+        if (hasChanges) break;
+      }
+      if (hasChanges) break;
+    }
+    
+    // If no changes, return cached geometry
+    if (!hasChanges) {
+      return this.cachedGeometry;
+    }
+    
+    // Store the updated field
+    this.cachedScalarField = new Float32Array(scalarField);
+    
+    // Reset vertex cache for a new mesh generation
+    this.vertexCache.clear();
+    
+    const positions: number[] = [];
+    const normals: number[] = [];
+    const indices: number[] = [];
+    
+    // Process only the dirty region and a small margin around it
+    for (let z = minZ - 1; z <= maxZ + 1; z++) {
+      for (let y = minY - 1; y <= maxY + 1; y++) {
+        for (let x = minX - 1; x <= maxX + 1; x++) {
+          if (x >= -1 && x < sizeX && 
+              y >= -1 && y < sizeY && 
+              z >= -1 && z < sizeZ) {
+            this.polygonizeCube(
+              x, y, z,
+              scalarField,
+              sizeX, sizeY, sizeZ,
+              positions, normals, indices
+            );
+          }
+        }
+      }
+    }
+    
+    // Create buffer geometry
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute('normal', new THREE.Float32BufferAttribute(normals, 3));
+    geometry.setIndex(indices);
+    
+    // This is important for proper lighting and ensures no normals are missing
+    geometry.computeVertexNormals();
+    geometry.computeBoundingSphere();
+    
+    // Store the updated geometry
+    this.cachedGeometry = geometry;
+    
+    return geometry;
   }
 } 

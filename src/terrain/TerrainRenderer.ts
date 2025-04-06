@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import GUI from 'lil-gui';
 import { NoiseGenerator, NoiseGeneratorOptions } from './NoiseGenerator';
 import { MarchingCubes, MarchingCubesOptions } from './marchingCubes';
+import { ChunkManager } from './ChunkManager';
 
 export interface TerrainRendererOptions {
   resolution: number;
@@ -9,6 +10,11 @@ export interface TerrainRendererOptions {
   material: THREE.Material;
   noiseOptions: Partial<NoiseGeneratorOptions>;
   marchingCubesOptions: Partial<MarchingCubesOptions>;
+  // Add chunk system options
+  useChunks: boolean;
+  chunkSize: number;
+  chunkResolution: number;
+  renderDistance: number;
 }
 
 export class TerrainRenderer {
@@ -20,10 +26,25 @@ export class TerrainRenderer {
   private debugVoxels: THREE.Group | null = null;
   private scalarField: Float32Array | null = null;
   
+  // Add ChunkManager for the chunk system
+  private chunkManager: ChunkManager | null = null;
+  
   // Add new properties for terrain modification
   private brushSize: number = 0.5;
   private brushStrength: number = 0.5;
   private isAddingTerrain: boolean = true; // true for adding, false for removing
+  
+  // Add these properties for optimization
+  private pendingUpdate: boolean = false;
+  private modifiedSinceLastUpdate: boolean = false;
+  private updateThrottleMs: number = 50; // Throttle updates to 20 fps max
+  private lastUpdateTime: number = 0;
+  private dirtyRegion: { min: THREE.Vector3, max: THREE.Vector3 } | null = null;
+  
+  // Performance settings
+  private minUpdateThrottleMs: number = 16; // Fastest update rate (60fps)
+  private maxUpdateThrottleMs: number = 200; // Slowest update rate (5fps)
+  private performanceMode: 'high' | 'medium' | 'low' = 'medium';
   
   constructor(options: Partial<TerrainRendererOptions> = {}) {
     // Set default options
@@ -38,6 +59,11 @@ export class TerrainRenderer {
       }),
       noiseOptions: {},
       marchingCubesOptions: {},
+      // Default chunk options
+      useChunks: true,
+      chunkSize: 25,
+      chunkResolution: 16,
+      renderDistance: 3,
       ...options
     };
     
@@ -51,7 +77,16 @@ export class TerrainRenderer {
   }
   
   // Generate and return the terrain mesh
-  generate(scene: THREE.Scene): THREE.Mesh {
+  generate(scene: THREE.Scene): THREE.Mesh | THREE.Group {
+    if (this.options.useChunks) {
+      return this.generateChunked(scene);
+    } else {
+      return this.generateMonolithic(scene);
+    }
+  }
+  
+  // Generate monolithic (single mesh) terrain
+  private generateMonolithic(scene: THREE.Scene): THREE.Mesh {
     const resolution = this.options.resolution;
     
     // Generate noise field and store it for debug visualization
@@ -78,8 +113,45 @@ export class TerrainRenderer {
     return this.mesh;
   }
   
+  // Generate chunked terrain
+  private generateChunked(scene: THREE.Scene): THREE.Group {
+    // Clean up any existing chunk manager
+    if (this.chunkManager) {
+      scene.remove(this.chunkManager.getChunkGroup());
+      this.chunkManager.dispose();
+      this.chunkManager = null;
+    }
+    
+    // Create a new chunk manager
+    this.chunkManager = new ChunkManager({
+      chunkSize: this.options.chunkSize,
+      chunkResolution: this.options.chunkResolution,
+      renderDistance: this.options.renderDistance,
+      material: this.options.material,
+      noiseGenerator: this.noise,
+      isoLevel: this.mesher.getOptions().isoLevel,
+      seamless: this.mesher.getOptions().seamless || true,
+      doubleSided: this.mesher.getOptions().doubleSided || true
+    });
+    
+    // Generate chunks around the origin
+    this.chunkManager.generateChunksAroundPosition(new THREE.Vector3(0, 0, 0));
+    
+    // Add the chunk group to the scene
+    const chunkGroup = this.chunkManager.getChunkGroup();
+    scene.add(chunkGroup);
+    
+    return chunkGroup;
+  }
+  
   // Toggle debug visualization of voxels
   toggleDebugVoxels(scene: THREE.Scene, show: boolean): void {
+    // Only supported in monolithic mode
+    if (this.options.useChunks) {
+      console.warn("Debug voxels not supported in chunked mode");
+      return;
+    }
+    
     // Remove existing debug voxels if any
     if (this.debugVoxels) {
       scene.remove(this.debugVoxels);
@@ -96,6 +168,175 @@ export class TerrainRenderer {
     }
   }
   
+  // Modify modifyTerrain to use chunk system if enabled
+  modifyTerrain(worldPos: THREE.Vector3, isAdding: boolean = true): void {
+    if (this.options.useChunks && this.chunkManager) {
+      // Modify terrain using the chunk system
+      const effectiveBrushSize = this.getOptimalBrushSize();
+      this.chunkManager.modifyTerrain(worldPos, effectiveBrushSize, this.brushStrength, isAdding);
+    } else if (this.scalarField) {
+      // Use the original monolithic terrain modification
+      this.modifyMonolithicTerrain(worldPos, isAdding);
+    }
+  }
+  
+  // Original monolithic terrain modification method
+  private modifyMonolithicTerrain(worldPos: THREE.Vector3, isAdding: boolean = true): void {
+    if (!this.scalarField) return;
+    
+    const resolution = this.options.resolution;
+    const { minX, maxX, minY, maxY, minZ, maxZ } = this.mesher.getOptions().bounds;
+    
+    // Get adaptive brush size based on resolution
+    const effectiveBrushSize = this.getOptimalBrushSize();
+    
+    // Convert world position to grid space
+    const gridX = Math.floor(((worldPos.x - minX) / (maxX - minX)) * (resolution - 1));
+    const gridY = Math.floor(((worldPos.y - minY) / (maxY - minY)) * (resolution - 1));
+    const gridZ = Math.floor(((worldPos.z - minZ) / (maxZ - minZ)) * (resolution - 1));
+    
+    // Calculate grid cell size - caching the calculation result
+    const cellSizeX = (maxX - minX) / (resolution - 1);
+    const cellSizeY = (maxY - minY) / (resolution - 1);
+    const cellSizeZ = (maxZ - minZ) / (resolution - 1);
+    
+    // Calculate brush radius in grid cells, using the effective brush size
+    const brushRadiusGrid = effectiveBrushSize / Math.min(cellSizeX, cellSizeY, cellSizeZ);
+    
+    // Determine affected grid cells
+    const radiusCeil = Math.ceil(brushRadiusGrid);
+    const minGridX = Math.max(0, gridX - radiusCeil);
+    const maxGridX = Math.min(resolution - 1, gridX + radiusCeil);
+    const minGridY = Math.max(0, gridY - radiusCeil);
+    const maxGridY = Math.min(resolution - 1, gridY + radiusCeil);
+    const minGridZ = Math.max(0, gridZ - radiusCeil);
+    const maxGridZ = Math.min(resolution - 1, gridZ + radiusCeil);
+    
+    // Track the dirty region for potential partial updates
+    if (!this.dirtyRegion) {
+      this.dirtyRegion = {
+        min: new THREE.Vector3(minGridX, minGridY, minGridZ),
+        max: new THREE.Vector3(maxGridX, maxGridY, maxGridZ)
+      };
+    } else {
+      this.dirtyRegion.min.x = Math.min(this.dirtyRegion.min.x, minGridX);
+      this.dirtyRegion.min.y = Math.min(this.dirtyRegion.min.y, minGridY);
+      this.dirtyRegion.min.z = Math.min(this.dirtyRegion.min.z, minGridZ);
+      this.dirtyRegion.max.x = Math.max(this.dirtyRegion.max.x, maxGridX);
+      this.dirtyRegion.max.y = Math.max(this.dirtyRegion.max.y, maxGridY);
+      this.dirtyRegion.max.z = Math.max(this.dirtyRegion.max.z, maxGridZ);
+    }
+    
+    // Cache squared radius for faster distance checks
+    const brushRadiusGridSquared = brushRadiusGrid * brushRadiusGrid;
+    
+    // Optimization: Calculate the influence values outside the loops
+    const maxInfluence = this.brushStrength;
+    
+    // Modify terrain density values within the brush radius
+    for (let z = minGridZ; z <= maxGridZ; z++) {
+      for (let y = minGridY; y <= maxGridY; y++) {
+        // Pre-calculate the index base for this y and z
+        const yzBase = y * resolution + z * resolution * resolution;
+        
+        for (let x = minGridX; x <= maxGridX; x++) {
+          // Calculate distance from brush center to this voxel
+          const dx = x - gridX;
+          const dy = y - gridY;
+          const dz = z - gridZ;
+          const distSquared = dx * dx + dy * dy + dz * dz;
+          
+          // Fast rejection test - if outside brush radius, skip
+          if (distSquared > brushRadiusGridSquared) continue;
+          
+          // Calculate falloff based on distance from center (smooth transition at edges)
+          // Optimization: Use approximation for sqrt when possible
+          const distance = distSquared < 0.0001 ? 0 : Math.sqrt(distSquared);
+          const falloff = 1.0 - Math.min(1.0, distance / brushRadiusGrid);
+          
+          // Calculate influence with falloff
+          const influence = maxInfluence * falloff * falloff; // Squared falloff for smoother brush
+          
+          // Update density value
+          const index = x + yzBase;
+          if (index >= 0 && index < this.scalarField.length) {
+            if (isAdding) {
+              // Subtract from value to add terrain (counter-intuitive but correct for marching cubes)
+              this.scalarField[index] -= influence;
+            } else {
+              // Add to value to remove terrain
+              this.scalarField[index] += influence;
+            }
+          }
+        }
+      }
+    }
+    
+    // Mark that we have modifications needing an update
+    this.modifiedSinceLastUpdate = true;
+    
+    // Throttle updates to avoid performance issues
+    this.scheduleUpdate();
+  }
+  
+  // Schedule a throttled update (for monolithic mode)
+  private scheduleUpdate(): void {
+    if (this.pendingUpdate) return; // Already scheduled
+    
+    const currentTime = performance.now();
+    const timeSinceLastUpdate = currentTime - this.lastUpdateTime;
+    
+    if (timeSinceLastUpdate >= this.updateThrottleMs) {
+      // Update immediately
+      this.updateMesh();
+    } else {
+      // Schedule update
+      this.pendingUpdate = true;
+      setTimeout(() => {
+        this.pendingUpdate = false;
+        if (this.modifiedSinceLastUpdate) {
+          this.updateMesh();
+        }
+      }, this.updateThrottleMs - timeSinceLastUpdate);
+    }
+  }
+  
+  // Update the mesh based on the current scalar field (for monolithic mode)
+  updateMesh(): void {
+    if (!this.scalarField || !this.mesh || !this.modifiedSinceLastUpdate) return;
+    
+    // Mark last update time
+    this.lastUpdateTime = performance.now();
+    this.modifiedSinceLastUpdate = false;
+    
+    const resolution = this.options.resolution;
+    
+    // Generate new geometry using the optimized method with dirty region
+    const geometry = this.mesher.generateMeshOptimized(
+      this.scalarField, 
+      resolution, 
+      resolution, 
+      resolution,
+      this.dirtyRegion || undefined
+    );
+    
+    // Clear dirty region after update
+    this.dirtyRegion = null;
+    
+    // Update mesh geometry
+    if (this.mesh.geometry) {
+      this.mesh.geometry.dispose();
+    }
+    this.mesh.geometry = geometry;
+    
+    // If debug voxels are visible, update them too
+    if (this.debugVoxels && this.debugVoxels.parent) {
+      const scene = this.debugVoxels.parent as THREE.Scene;
+      this.toggleDebugVoxels(scene, false);
+      this.toggleDebugVoxels(scene, true);
+    }
+  }
+  
   // Create a GUI for adjusting parameters
   setupGUI(container: HTMLElement, scene: THREE.Scene): GUI {
     if (this.gui) {
@@ -103,6 +344,38 @@ export class TerrainRenderer {
     }
     
     this.gui = new GUI({ container });
+    
+    // Add chunk system controls
+    const chunkFolder = this.gui.addFolder('Chunks');
+    
+    // Create object for GUI controls
+    const chunkParams = {
+      useChunks: this.options.useChunks,
+      chunkSize: this.options.chunkSize,
+      chunkResolution: this.options.chunkResolution,
+      renderDistance: this.options.renderDistance,
+      regenerate: () => this.regenerate(scene)
+    };
+    
+    // Add controls
+    chunkFolder.add(chunkParams, 'useChunks').name('Use Chunks').onChange((value: boolean) => {
+      this.options.useChunks = value;
+    });
+    
+    chunkFolder.add(chunkParams, 'chunkSize', 10, 100, 5).name('Chunk Size').onChange((value: number) => {
+      this.options.chunkSize = value;
+    });
+    
+    chunkFolder.add(chunkParams, 'chunkResolution', 8, 32, 4).name('Chunk Resolution').onChange((value: number) => {
+      this.options.chunkResolution = value;
+    });
+    
+    chunkFolder.add(chunkParams, 'renderDistance', 1, 10, 1).name('Render Distance').onChange((value: number) => {
+      this.options.renderDistance = value;
+      if (this.chunkManager) {
+        this.chunkManager.setRenderDistance(value);
+      }
+    });
     
     // Noise parameters folder
     const noiseFolder = this.gui.addFolder('Noise');
@@ -204,7 +477,8 @@ export class TerrainRenderer {
     const editingParams = {
       brushSize: this.brushSize,
       brushStrength: this.brushStrength,
-      isAddingTerrain: this.isAddingTerrain
+      isAddingTerrain: this.isAddingTerrain,
+      performanceMode: this.performanceMode
     };
     
     // Brush size control
@@ -221,6 +495,43 @@ export class TerrainRenderer {
     editingFolder.add(editingParams, 'isAddingTerrain').name('Add Terrain (vs Remove)').onChange((value: boolean) => {
       this.setBrushMode(value);
     });
+    
+    // Performance mode control
+    editingFolder.add(editingParams, 'performanceMode', ['high', 'medium', 'low'])
+      .name('Performance Mode')
+      .onChange((value: 'high' | 'medium' | 'low') => {
+        this.setPerformanceMode(value);
+      });
+    
+    // Add tooltip explaining performance modes
+    const perfController = editingFolder.controllers.find(c => c.property === 'performanceMode');
+    if (perfController && perfController.domElement) {
+      const tooltip = document.createElement('div');
+      tooltip.style.display = 'none';
+      tooltip.style.position = 'absolute';
+      tooltip.style.backgroundColor = 'rgba(0,0,0,0.8)';
+      tooltip.style.color = 'white';
+      tooltip.style.padding = '5px';
+      tooltip.style.borderRadius = '3px';
+      tooltip.style.zIndex = '1000';
+      tooltip.style.width = '200px';
+      tooltip.style.fontSize = '12px';
+      tooltip.innerHTML = 'high: Better quality, slower updates<br>' +
+                          'medium: Balanced performance<br>' +
+                          'low: Faster updates, may affect quality';
+      document.body.appendChild(tooltip);
+      
+      perfController.domElement.addEventListener('mouseenter', () => {
+        const rect = perfController.domElement.getBoundingClientRect();
+        tooltip.style.left = rect.right + 'px';
+        tooltip.style.top = rect.top + 'px';
+        tooltip.style.display = 'block';
+      });
+      
+      perfController.domElement.addEventListener('mouseleave', () => {
+        tooltip.style.display = 'none';
+      });
+    }
     
     // Debug visualization folder
     const debugFolder = this.gui.addFolder('Debug');
@@ -242,9 +553,13 @@ export class TerrainRenderer {
   }
   
   // Force regeneration of the terrain
-  regenerate(scene?: THREE.Scene): THREE.Mesh | null {
-    if (scene || (this.mesh && this.mesh.parent)) {
-      return this.generate(scene || (this.mesh?.parent as THREE.Scene));
+  regenerate(scene?: THREE.Scene): THREE.Mesh | THREE.Group | null {
+    if (scene) {
+      return this.generate(scene);
+    } else if (this.mesh && this.mesh.parent) {
+      return this.generate(this.mesh.parent as THREE.Scene);
+    } else if (this.chunkManager && this.chunkManager.getChunkGroup().parent) {
+      return this.generate(this.chunkManager.getChunkGroup().parent as THREE.Scene);
     }
     return null;
   }
@@ -266,6 +581,15 @@ export class TerrainRenderer {
       this.mesh = null;
     }
     
+    if (this.chunkManager) {
+      const chunkGroup = this.chunkManager.getChunkGroup();
+      if (chunkGroup.parent) {
+        chunkGroup.parent.remove(chunkGroup);
+      }
+      this.chunkManager.dispose();
+      this.chunkManager = null;
+    }
+    
     if (this.debugVoxels && this.debugVoxels.parent) {
       this.debugVoxels.parent.remove(this.debugVoxels);
       this.debugVoxels.traverse((child) => {
@@ -282,97 +606,6 @@ export class TerrainRenderer {
     if (this.gui) {
       this.gui.destroy();
       this.gui = null;
-    }
-  }
-  
-  // Add a method to modify the terrain at a world position with a sphere brush
-  modifyTerrain(worldPos: THREE.Vector3, isAdding: boolean = true): void {
-    if (!this.scalarField) return;
-    
-    const resolution = this.options.resolution;
-    const { minX, maxX, minY, maxY, minZ, maxZ } = this.mesher.getOptions().bounds;
-    
-    // Convert world position to grid space
-    const gridX = Math.floor(((worldPos.x - minX) / (maxX - minX)) * (resolution - 1));
-    const gridY = Math.floor(((worldPos.y - minY) / (maxY - minY)) * (resolution - 1));
-    const gridZ = Math.floor(((worldPos.z - minZ) / (maxZ - minZ)) * (resolution - 1));
-    
-    // Calculate grid cell size
-    const cellSizeX = (maxX - minX) / (resolution - 1);
-    const cellSizeY = (maxY - minY) / (resolution - 1);
-    const cellSizeZ = (maxZ - minZ) / (resolution - 1);
-    
-    // Calculate brush radius in grid cells
-    const brushRadiusGrid = this.brushSize / Math.min(cellSizeX, cellSizeY, cellSizeZ);
-    
-    // Determine affected grid cells
-    const radiusCeil = Math.ceil(brushRadiusGrid);
-    const minGridX = Math.max(0, gridX - radiusCeil);
-    const maxGridX = Math.min(resolution - 1, gridX + radiusCeil);
-    const minGridY = Math.max(0, gridY - radiusCeil);
-    const maxGridY = Math.min(resolution - 1, gridY + radiusCeil);
-    const minGridZ = Math.max(0, gridZ - radiusCeil);
-    const maxGridZ = Math.min(resolution - 1, gridZ + radiusCeil);
-    
-    // Modify terrain density values within the brush radius
-    for (let z = minGridZ; z <= maxGridZ; z++) {
-      for (let y = minGridY; y <= maxGridY; y++) {
-        for (let x = minGridX; x <= maxGridX; x++) {
-          // Calculate distance from brush center to this voxel
-          const dx = x - gridX;
-          const dy = y - gridY;
-          const dz = z - gridZ;
-          const distSquared = dx * dx + dy * dy + dz * dz;
-          
-          // If within brush sphere radius
-          if (distSquared <= brushRadiusGrid * brushRadiusGrid) {
-            // Calculate falloff based on distance from center (smooth transition at edges)
-            const distance = Math.sqrt(distSquared);
-            const falloff = 1.0 - Math.min(1.0, distance / brushRadiusGrid);
-            
-            // Calculate influence with falloff
-            const influence = this.brushStrength * falloff * falloff; // Squared falloff for smoother brush
-            
-            // Update density value
-            const index = x + y * resolution + z * resolution * resolution;
-            if (index >= 0 && index < this.scalarField.length) {
-              if (isAdding) {
-                // Subtract from value to add terrain (counter-intuitive but correct for marching cubes)
-                this.scalarField[index] -= influence;
-              } else {
-                // Add to value to remove terrain
-                this.scalarField[index] += influence;
-              }
-            }
-          }
-        }
-      }
-    }
-    
-    // Regenerate mesh with modified scalar field
-    this.updateMesh();
-  }
-  
-  // Update the mesh based on the current scalar field
-  updateMesh(): void {
-    if (!this.scalarField || !this.mesh) return;
-    
-    const resolution = this.options.resolution;
-    const geometry = this.mesher.generateMesh(
-      this.scalarField, resolution, resolution, resolution
-    );
-    
-    // Update mesh geometry
-    if (this.mesh.geometry) {
-      this.mesh.geometry.dispose();
-    }
-    this.mesh.geometry = geometry;
-    
-    // If debug voxels are visible, update them too
-    if (this.debugVoxels && this.debugVoxels.parent) {
-      const scene = this.debugVoxels.parent as THREE.Scene;
-      this.toggleDebugVoxels(scene, false);
-      this.toggleDebugVoxels(scene, true);
     }
   }
   
@@ -405,9 +638,49 @@ export class TerrainRenderer {
   getBrushMode(): boolean {
     return this.isAddingTerrain;
   }
+  
+  // Get optimal brush size based on resolution
+  getOptimalBrushSize(): number {
+    // Scale brush size based on chunk resolution when in chunk mode
+    const resolution = this.options.useChunks ? this.options.chunkResolution : this.options.resolution;
+    
+    if (resolution <= 16) {
+      return this.brushSize;
+    } else if (resolution <= 32) {
+      return this.brushSize * 0.75;
+    } else if (resolution <= 48) {
+      return this.brushSize * 0.5;
+    } else {
+      return this.brushSize * 0.25;
+    }
+  }
+  
+  // Set performance mode and adjust settings accordingly
+  setPerformanceMode(mode: 'high' | 'medium' | 'low'): void {
+    this.performanceMode = mode;
+    
+    // Adjust settings based on mode
+    switch (mode) {
+      case 'high':
+        // High quality, slower updates
+        this.updateThrottleMs = this.maxUpdateThrottleMs;
+        break;
+      case 'medium':
+        // Balance between quality and speed
+        this.updateThrottleMs = Math.floor((this.minUpdateThrottleMs + this.maxUpdateThrottleMs) / 2);
+        break;
+      case 'low':
+        // Lower quality, faster updates
+        this.updateThrottleMs = this.minUpdateThrottleMs;
+        break;
+    }
+  }
 
-  // Add getter for the mesh
-  get terrainMesh(): THREE.Mesh | null {
+  // Add getter for the mesh (returns chunk group if in chunked mode)
+  get terrainMesh(): THREE.Mesh | THREE.Group | null {
+    if (this.options.useChunks && this.chunkManager) {
+      return this.chunkManager.getChunkGroup();
+    }
     return this.mesh;
   }
 } 
